@@ -1,0 +1,22 @@
+{
+  "active_to_delinquent_prob": 0.06,
+  "delinquent_to_default_prob": 0.35,
+  "cure_to_active_prob": 0.4,
+  "transition_matrix": {
+    "ACTIVE": {
+      "ACTIVE": 0.94,
+      "DELINQUENT": 0.06,
+      "DEFAULTED": 0.0
+    },
+    "DELINQUENT": {
+      "ACTIVE": 0.4,
+      "DELINQUENT": 0.25,
+      "DEFAULTED": 0.35
+    },
+    "DEFAULTED": {
+      "DELINQUENT": 0.15,
+      "DEFAULTED": 0.55,
+      "REPOSSESSED": 0.3
+    }
+  }
+}
