@@ -913,13 +913,13 @@ def build_executive_summary(scope_name, scope_accounts, expected_sum, scheduled_
     return exec_summary, risk_obs
 
 
-def run_predictive_pipeline():
+def run_predictive_pipeline(target_month=None):
     """Main execution entry point."""
     print("=== BOMELI ML ENGINE: RUNNING PREDICTIVE FORECASTING PIPELINE ===")
 
     conn = get_db_connection()
     rate_pkg = get_active_rate_package(conn)
-    current_month_str = datetime.now().strftime('%Y-%m')
+    current_month_str = target_month if target_month else datetime.now().strftime('%Y-%m')
 
     print(f"[pipeline] Target Forecast Month: {current_month_str}")
     print(f"[pipeline] Active Financing Rate Package: '{rate_pkg['package_name']}'")
