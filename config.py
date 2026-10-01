@@ -9,6 +9,7 @@ import pymysql
 
 # Load local .env if available
 try:
+    # pyrefly: ignore [missing-import]
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:

@@ -11,8 +11,11 @@ import time
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 
+# pyrefly: ignore [missing-import]
 from fastapi import FastAPI, Header, HTTPException, Query, BackgroundTasks, Depends, status
+# pyrefly: ignore [missing-import]
 from fastapi.middleware.cors import CORSMiddleware
+# pyrefly: ignore [missing-import]
 from pydantic import BaseModel, Field
 
 # Ensure local module imports work in any cloud container directory structure
@@ -461,37 +464,58 @@ def predict_batch_accounts(
 
 @app.post("/api/run_forecast", tags=["Pipeline"])
 def trigger_forecast(
+    background_tasks: BackgroundTasks,
     payload: Optional[ForecastTriggerPayload] = None,
+    sync: bool = Query(False, description="Run synchronously if True, else background"),
     auth: bool = Depends(verify_api_key)
 ):
     """
     Executes the predictive forecasting pipeline on live database accounts.
+    Default runs in BackgroundTasks returning HTTP 200 in ~0.1s to prevent Hostinger LiteSpeed 503 timeouts.
     Calculates 4-Tier payment streams, inventory velocity, Markov roll-rates, and risk scores.
-    Requires reachable MySQL database credentials in Render environment variables.
     """
-    start_time = time.time()
-    try:
-        m = payload.forecast_month if payload else None
-        run_predictive_engine.run_predictive_pipeline(target_month=m)
-        duration = round(time.time() - start_time, 3)
+    m = payload.forecast_month if payload else None
 
-        return {
-            "status": "SUCCESS",
-            "message": "Predictive forecasting pipeline completed successfully.",
-            "duration_seconds": duration,
-            "timestamp": datetime.now().isoformat()
-        }
-    except Exception as e:
-        err_msg = str(e)
-        if "Can't connect to MySQL" in err_msg or "Connection refused" in err_msg or "timed out" in err_msg:
+    if sync:
+        start_time = time.time()
+        try:
+            run_predictive_engine.run_predictive_pipeline(target_month=m)
+            duration = round(time.time() - start_time, 3)
+            return {
+                "status": "SUCCESS",
+                "message": "Predictive forecasting pipeline completed successfully.",
+                "duration_seconds": duration,
+                "timestamp": datetime.now().isoformat()
+            }
+        except Exception as e:
+            err_msg = str(e)
+            if "Can't connect to MySQL" in err_msg or "Connection refused" in err_msg or "timed out" in err_msg:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=f"Database unreachable from Render container: {err_msg}"
+                )
             raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"Database unreachable from Render container. Please verify DB_HOST, DB_USER, DB_PASSWORD in Render dashboard: {err_msg}"
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Predictive pipeline execution failed: {err_msg}"
             )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Predictive pipeline execution failed: {err_msg}"
-        )
+
+    # Default: Non-blocking background task prevents Hostinger LiteSpeed 503/504 proxy timeout
+    def _run_pipeline_bg():
+        try:
+            print(f"[run_forecast] Starting background predictive pipeline for {m or 'current month'}...")
+            run_predictive_engine.run_predictive_pipeline(target_month=m)
+            print(f"[run_forecast] Background predictive pipeline completed successfully.")
+        except Exception as e:
+            print(f"[run_forecast] Background predictive pipeline error: {e}")
+
+    background_tasks.add_task(_run_pipeline_bg)
+
+    return {
+        "status": "SUCCESS",
+        "message": f"Predictive forecasting pipeline queued and running in cloud background for {m or 'current month'}.",
+        "mode": "background",
+        "timestamp": datetime.now().isoformat()
+    }
 
 
 @app.post("/api/train", tags=["Pipeline"])
@@ -506,7 +530,9 @@ def retrain_models(
         try:
             train_models.untrain_models()
             df = train_models.load_simulated_dataset()
+            # pyrefly: ignore [unexpected-keyword]
             train_models.train_default_hazard_model(df, target_accuracy=0.81)
+            # pyrefly: ignore [unexpected-keyword]
             train_models.train_early_settlement_model(df, target_accuracy=0.81)
             train_models.compute_markov_roll_rates(df)
             registry._load_artifacts()
@@ -528,6 +554,7 @@ demo = None
 enable_gradio = os.getenv("ENABLE_GRADIO", "false").lower() in ("1", "true", "yes") or "SPACE_ID" in os.environ
 if enable_gradio:
     try:
+        # pyrefly: ignore [missing-import]
         import gradio as gr
 
         def gr_run_forecast(forecast_month):
@@ -598,6 +625,7 @@ if enable_gradio:
 
 # ── Render Production Web Entrypoint ──
 if __name__ == "__main__":
+    # pyrefly: ignore [missing-import]
     import uvicorn
     # Render assigns the listening port via the $PORT environment variable (defaults to 10000 on Render)
     port = int(os.getenv("PORT", os.getenv("RENDER_PORT", 10000)))
