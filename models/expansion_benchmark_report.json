@@ -1,0 +1,56 @@
+{
+  "model_name": "Geospatial Branch Expansion & Credit Risk Classifier",
+  "algorithm": "Linear Support Vector Machine (Linear SVM, Platt Calibrated)",
+  "kernel_type": "Linear Maximum-Margin Hyperplane",
+  "generated_at": "2026-09-30 12:40:00",
+  "holdout_split": "80% Train / 20% Predict",
+  "total_dataset_size": 310,
+  "train_samples": 248,
+  "test_samples": 62,
+  "metrics": {
+    "accuracy_pct": 88.71,
+    "balanced_accuracy_pct": 88.59,
+    "precision_pct": 84.62,
+    "recall_pct": 88.0,
+    "f1_score": 0.8627,
+    "roc_auc": 0.9546
+  },
+  "confusion_matrix": {
+    "true_negatives": 33,
+    "false_positives": 4,
+    "false_negatives": 3,
+    "true_positives": 22
+  },
+  "feature_importance_ranking": [
+    {
+      "feature": "repayment_rate",
+      "importance_pct": 55.9,
+      "svm_coefficient": -1.3976,
+      "description": "Historical Repayment Discipline"
+    },
+    {
+      "feature": "dist_km",
+      "importance_pct": 23.75,
+      "svm_coefficient": 0.5938,
+      "description": "Physical Distance to Servicing Branch (km)"
+    },
+    {
+      "feature": "dti",
+      "importance_pct": 8.91,
+      "svm_coefficient": 0.2228,
+      "description": "Debt-to-Income (DTI) Burden"
+    },
+    {
+      "feature": "income",
+      "importance_pct": 6.44,
+      "svm_coefficient": -0.1611,
+      "description": "Declared Disposable Monthly Income"
+    },
+    {
+      "feature": "is_migrated",
+      "importance_pct": 4.99,
+      "svm_coefficient": -0.1247,
+      "description": "Address Divergence (Present vs Permanent)"
+    }
+  ]
+}

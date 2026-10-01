@@ -27,21 +27,33 @@ def test_integration():
     assert os.path.exists(sim_csv), f"Simulated data file missing: {sim_csv}"
     df_sim = pd.read_csv(sim_csv)
     assert len(df_sim) >= 500, f"Expected at least 500 records, got {len(df_sim)}"
-    print(f"[PASS] Simulated Dataset: {len(df_sim)} records verified in {sim_csv}")
+    print(f"[PASS] Simulated Portfolio Dataset: {len(df_sim):,} records verified in {sim_csv}")
+
+    sim_vel_csv = os.path.join(DATA_DIR, 'simulated_inventory_velocity.csv')
+    if os.path.exists(sim_vel_csv):
+        df_vel = pd.read_csv(sim_vel_csv)
+        assert len(df_vel) >= 1000, f"Expected at least 1,000 records, got {len(df_vel)}"
+        print(f"[PASS] Simulated Inventory Velocity Dataset: {len(df_vel):,} records verified in {sim_vel_csv}")
 
     # 3. Test Trained Models
     hazard_path = os.path.join(MODELS_DIR, 'default_hazard_model.joblib')
+    vel_path = os.path.join(MODELS_DIR, 'inventory_velocity_model.joblib')
     early_path = os.path.join(MODELS_DIR, 'early_settlement_model.joblib')
     markov_path = os.path.join(MODELS_DIR, 'markov_matrix.json')
 
     assert os.path.exists(hazard_path), "Missing default_hazard_model.joblib"
+    assert os.path.exists(vel_path), "Missing inventory_velocity_model.joblib"
     assert os.path.exists(early_path), "Missing early_settlement_model.joblib"
     assert os.path.exists(markov_path), "Missing markov_matrix.json"
 
     hazard_model = joblib.load(hazard_path)
+    if isinstance(hazard_model, dict): hazard_model = hazard_model.get('pipeline') or hazard_model.get('model', hazard_model)
+    vel_model = joblib.load(vel_path)
+    if isinstance(vel_model, dict): vel_model = vel_model.get('pipeline') or vel_model.get('model', vel_model)
     early_model = joblib.load(early_path)
+    if isinstance(early_model, dict): early_model = early_model.get('pipeline') or early_model.get('model', early_model)
 
-    # Test sample prediction
+    # Test sample prediction for Model 1
     sample_feat = pd.DataFrame([{
         'term_progress_ratio': 0.50,
         'dti_ratio': 0.22,
@@ -59,6 +71,24 @@ def test_integration():
     p_def = hazard_model.predict_proba(sample_feat)[0, 1]
     assert 0.0 <= p_def <= 1.0, "Hazard prob out of range"
     print(f"[PASS] Model 1 Test Inference: sample prime borrower default probability = {p_def:.4f}")
+
+    # Test sample prediction for Model 2 (Inventory Velocity Model)
+    sample_vel_feat = pd.DataFrame([{
+        'brand': 'HONDA',
+        'vehicle_category': 'Scooter',
+        'base_price': 122900.0,
+        'season_month': 9,
+        'lag_1': 2.0,
+        'lag_3': 6.0,
+        'lag_6': 12.0,
+        'lag_12': 2.0,
+        'net_lag_3': 18.0,
+        'branch_lag_3': 30.0,
+        'stock_start': 5.0
+    }])
+    pred_vel = float(vel_model.predict(sample_vel_feat)[0])
+    assert pred_vel >= 0.0, f"Velocity out of bounds: {pred_vel}"
+    print(f"[PASS] Model 2 Test Inference (Inventory Velocity Model): CLICK 160 predicted velocity = {pred_vel:.2f} units/month")
 
     # 4. Test MySQL Ingestion
     with conn.cursor() as cur:

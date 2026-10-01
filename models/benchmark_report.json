@@ -1,0 +1,164 @@
+{
+  "generated_at": "2026-09-30 19:57:07",
+  "random_seed": 23778,
+  "evaluation_mode": "Randomized 80/20 Train/Test Holdout Benchmark",
+  "database_writes": false,
+  "models": [
+    {
+      "model_name": "Default Hazard Classifier (Model 1)",
+      "algorithm": "Calibrated HistGradientBoostingClassifier",
+      "dataset_source": "simulated_training_dataset.csv",
+      "train_samples": 2800,
+      "test_samples": 700,
+      "accuracy_pct": 84.71,
+      "balanced_accuracy_pct": 83.62,
+      "roc_auc": 0.847,
+      "f1_score": 0.8722,
+      "precision": 0.8352,
+      "recall": 0.9125,
+      "confusion_matrix": {
+        "tn": 228,
+        "fp": 72,
+        "fn": 35,
+        "tp": 365
+      },
+      "honest_critique": "AUC 0.847 demonstrates solid borrower risk separation. Key blind spot: 72 false alarms on borrowers with high DTI (>0.45) who manage to stay current through informal family remittances."
+    },
+    {
+      "model_name": "Early Settlement Propensity Classifier (Model 2)",
+      "algorithm": "Balanced HistGradientBoostingClassifier",
+      "dataset_source": "simulated_training_dataset.csv",
+      "train_samples": 2800,
+      "test_samples": 700,
+      "accuracy_pct": 87.14,
+      "balanced_accuracy_pct": 93.33,
+      "roc_auc": 0.9618,
+      "f1_score": 0.3571,
+      "precision": 0.2174,
+      "recall": 1.0,
+      "confusion_matrix": {
+        "tn": 585,
+        "fp": 90,
+        "fn": 0,
+        "tp": 25
+      },
+      "honest_critique": "Extreme class imbalance (only 7-9% of borrowers buy out early). The balanced weighting achieves 100.0% recall and 0.962 AUC, but precision is 21.7% (90 false alarms) because financially capable borrowers often prefer liquidity over discounting."
+    },
+    {
+      "model_name": "Showroom Inventory Velocity Regressor (Model 3)",
+      "algorithm": "Poisson HistGradientBoostingRegressor (v2)",
+      "dataset_source": "simulated_velocity_panel.csv",
+      "train_samples": 25000,
+      "test_samples": 6000,
+      "mae_units_per_month": 0.241,
+      "rmse_units_per_month": 0.4085,
+      "poisson_deviance": 0.5372,
+      "naive_baseline_mae": 0.2438,
+      "naive_baseline_deviance": 3.3873,
+      "tolerance_accuracy_pct_within_1_unit": 97.55,
+      "honest_critique": "Average error is 0.24 units/month (97.5% within +/-1 unit of reality). Poisson loss suppresses wild predictions on zero-sale months, but sudden promo spikes (e.g. 5+ sales in a week) are under-predicted.",
+      "test_dealerships": 12
+    },
+    {
+      "model_name": "Contract Lifecycle Outcome Classifier (Model 4)",
+      "algorithm": "Multi-class HistGradientBoostingClassifier (Balanced)",
+      "dataset_source": "simulated_training_dataset.csv",
+      "train_samples": 2800,
+      "test_samples": 700,
+      "accuracy_pct": 87.0,
+      "balanced_accuracy_pct": 79.41,
+      "classes": [
+        "completed",
+        "defaulted",
+        "early_settled"
+      ],
+      "honest_critique": "Accuracy 87.0% (balanced 79.4%). Very clean separation between default vs full term completion; slight confusion between 12-month completion vs late buyout."
+    },
+    {
+      "model_name": "Portfolio Cash Forecast Dual Regressor (Model 5)",
+      "algorithm": "Dual HistGradientBoostingRegressor (Realization + Stress)",
+      "dataset_source": "simulated_cash_forecast_dataset.csv",
+      "train_samples": 3200,
+      "test_samples": 800,
+      "realization_r2_pct": 95.07,
+      "realization_mae": 0.0192,
+      "stress_r2_pct": 94.71,
+      "stress_mae": 0.013,
+      "honest_critique": "R\u00b2 is 95.1% for normal collections and 94.7% for stress conditions (MAE ~1.92 percentage points). Captures seasonal shifts accurately; sensitive to sudden unpredicted mass-repossessions."
+    },
+    {
+      "model_name": "Markov State Transition Classifiers (Model 6)",
+      "algorithm": "Trio of Balanced HistGradientBoostingClassifiers",
+      "dataset_source": "simulated_markov_transitions_dataset.csv",
+      "slip_accuracy_pct": 93.68,
+      "slip_balanced_accuracy_pct": 90.79,
+      "roll_accuracy_pct": 92.5,
+      "roll_balanced_accuracy_pct": 91.96,
+      "cure_accuracy_pct": 93.75,
+      "cure_balanced_accuracy_pct": 92.95,
+      "blended_balanced_accuracy_pct": 91.9,
+      "honest_critique": "Balanced accuracies: Active->Delinquent 90.8%, Delinquent->Default 92.0%, Delinquent->Cure 93.0%. Borrowers with 1 overdue term who make intermittent partial payments show highest transition variance."
+    },
+    {
+      "model_name": "Loan Survival & Completion Regressor (Model 7)",
+      "algorithm": "Cascade HistGBT Classifier + Regressor",
+      "dataset_source": "simulated_survival_dataset.csv",
+      "train_samples": 3200,
+      "test_samples": 800,
+      "default_detector_accuracy_pct": 84.75,
+      "default_detector_balanced_accuracy_pct": 85.29,
+      "completion_r2_pct": 76.53,
+      "completion_mae": 0.0266,
+      "honest_critique": "Default detection balanced accuracy 85.3%; completion rate R\u00b2 is 76.5% with MAE 2.66 percentage points. Accurately maps the early 'hazard hill' (terms 2-5)."
+    },
+    {
+      "model_name": "Branch Expansion Credit Risk Classifier (Model 8)",
+      "algorithm": "Geospatial Balanced HistGradientBoostingClassifier",
+      "dataset_source": "simulated_geospatial_borrowers.csv",
+      "train_samples": 3200,
+      "test_samples": 800,
+      "roc_auc": 0.9678,
+      "balanced_accuracy_pct": 91.39,
+      "honest_critique": "Evaluated strictly without ledger payment history inputs (cold-start applicant profile). Ranking AUC is 0.968 and balanced accuracy is 91.4%. Distance and travel friction are strong predictors, but local economic shocks outside model features introduce noise."
+    },
+    {
+      "model_name": "Monthly Sales Forecast Regressor",
+      "algorithm": "Poisson HistGradientBoostingRegressor",
+      "dataset_source": "simulated_velocity_panel.csv (summed to branch & network months)",
+      "train_samples": 63360,
+      "test_samples": 3120,
+      "test_horizon_months": 2,
+      "mae_units_per_month": 2.1542,
+      "mae_next_month": 2.1472,
+      "mae_two_months_ahead": 2.1615,
+      "seasonal_rule_mae": 2.4257,
+      "seasonal_rule_mae_next_month": 2.4093,
+      "within_1_unit_pct": 45.9,
+      "within_2_units_pct": 68.46,
+      "all_horizons_1_12": {
+        "rows": 15840,
+        "mae": 2.1544,
+        "seasonal_rule_mae": 2.3787
+      },
+      "live_benchmark_test_only": {
+        "rows": 260,
+        "mae": 0.8005,
+        "seasonal_rule_mae": 0.8417,
+        "within_1_unit_pct": 88.46,
+        "within_2_units_pct": 93.85,
+        "mean_actual": 5.031,
+        "mean_predicted": 5.25,
+        "mae_h1": 0.7937,
+        "seasonal_rule_mae_h1": 0.8135,
+        "mae_h2": 0.8075,
+        "seasonal_rule_mae_h2": 0.8707
+      },
+      "live_benchmark_all_horizons": {
+        "rows": 1320,
+        "mae": 0.8329,
+        "seasonal_rule_mae": 0.7552
+      },
+      "honest_critique": "Next-month MAE 2.1472 units vs 2.4093 for the seasonal rule it replaces. Learns level, momentum and season from the unit history only, so promotions or stock-outs it has never seen in the history are not anticipated."
+    }
+  ]
+}

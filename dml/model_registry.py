@@ -25,12 +25,15 @@ class ModelRegistry:
         self.models_dir = models_dir
 
         self.default_model = None
+        self.inventory_velocity_model = None
         self.early_settlement_model = None
+        self.lifecycle_outcome_model = None
+        self.cash_realization_model = None
         self.markov_matrix = None
         self._load_artifacts()
 
     def _load_artifacts(self):
-        """Loads serialized models if present on disk, with self-healing fallback."""
+        """Loads pre-trained serialized model artifacts from disk without in-process auto-training."""
         def_path = os.path.join(self.models_dir, 'default_hazard_model.joblib')
         if os.path.exists(def_path):
             try:
@@ -38,6 +41,14 @@ class ModelRegistry:
             except Exception as e:
                 print(f"[registry] Warning: Failed to load default hazard model: {e}")
                 self.default_model = None
+
+        vel_path = os.path.join(self.models_dir, 'inventory_velocity_model.joblib')
+        if os.path.exists(vel_path):
+            try:
+                self.inventory_velocity_model = joblib.load(vel_path)
+            except Exception as e:
+                print(f"[registry] Warning: Failed to load inventory velocity model: {e}")
+                self.inventory_velocity_model = None
 
         early_path = os.path.join(self.models_dir, 'early_settlement_model.joblib')
         if os.path.exists(early_path):
@@ -47,36 +58,93 @@ class ModelRegistry:
                 print(f"[registry] Warning: Failed to load early settlement model: {e}")
                 self.early_settlement_model = None
 
+        lifecycle_path = os.path.join(self.models_dir, 'lifecycle_outcome_model.joblib')
+        if os.path.exists(lifecycle_path):
+            try:
+                self.lifecycle_outcome_model = joblib.load(lifecycle_path)
+            except Exception as e:
+                print(f"[registry] Warning: Failed to load lifecycle outcome model: {e}")
+                self.lifecycle_outcome_model = None
+
+        cash_path = os.path.join(self.models_dir, 'cash_realization_model.joblib')
+        if os.path.exists(cash_path):
+            try:
+                self.cash_realization_model = joblib.load(cash_path)
+            except Exception as e:
+                print(f"[registry] Warning: Failed to load cash realization model: {e}")
+                self.cash_realization_model = None
+
         markov_path = os.path.join(self.models_dir, 'markov_matrix.json')
         if os.path.exists(markov_path):
             try:
-                with open(markov_path, 'r') as f:
+                with open(markov_path, 'r', encoding='utf-8') as f:
                     self.markov_matrix = json.load(f)
             except Exception as e:
                 print(f"[registry] Warning: Failed to load Markov matrix: {e}")
                 self.markov_matrix = None
 
-        # Self-healing fallback: If models failed to load or are incompatible with runtime scikit-learn,
-        # automatically re-train in-process so service operates without interruption.
-        if self.default_model is None or self.early_settlement_model is None:
+    @property
+    def velocity_model_version(self) -> int:
+        m = self.inventory_velocity_model
+        return int(m.get('version', 1)) if isinstance(m, dict) else 1
+
+    def predict_velocity(self, features: Dict[str, Any]) -> float:
+        """
+        v2 Stock Velocity: expected units of one model sold at one branch in a month.
+        `features` comes from dml.velocity_features.SalesPanel.features().
+        Falls back to the 3-month average when the v2 bundle is not available.
+        """
+        if self.velocity_model_version >= 2:
             try:
-                print("[registry] Models missing or version incompatible. Auto-calibrating in-process...")
-                import train_models
-                df = train_models.load_simulated_dataset()
-                if df is not None:
-                    train_models.train_default_hazard_model(df, target_accuracy=0.81)
-                    train_models.train_early_settlement_model(df, target_accuracy=0.81)
-                    train_models.compute_markov_roll_rates(df)
-                    if os.path.exists(def_path):
-                        self.default_model = joblib.load(def_path)
-                    if os.path.exists(early_path):
-                        self.early_settlement_model = joblib.load(early_path)
-                    if os.path.exists(markov_path):
-                        with open(markov_path, 'r') as f:
-                            self.markov_matrix = json.load(f)
-                    print("[registry] Auto-calibration complete. All models loaded and ready!")
-            except Exception as train_err:
-                print(f"[registry] Warning: Auto-calibration failed: {train_err}")
+                bundle = self.inventory_velocity_model
+                feat_df = pd.DataFrame([{k: features[k] for k in bundle['features']}])
+                return max(0.0, float(bundle['pipeline'].predict(feat_df)[0]))
+            except Exception as e:
+                print(f"[registry] Warning: velocity v2 prediction failed: {e}")
+        return max(0.0, float(features.get('lag_3', 0)) / 3.0)
+
+    def predict_inventory_velocity(
+        self,
+        brand: str,
+        vehicle_category: str,
+        base_price: float,
+        branch_name: str,
+        avg_days_on_lot: float,
+        trailing_sales_count: int,
+        season_month: int
+    ) -> float:
+        """
+        Legacy signature (v1 callers such as benchmark scripts). With a v2 bundle loaded, the single
+        90-day count is spread across the v2 lag features; prefer predict_velocity() with real lags.
+        """
+        if self.velocity_model_version >= 2:
+            t = float(trailing_sales_count or 0)
+            return round(self.predict_velocity({
+                'lag_1': t / 3.0, 'lag_3': t, 'lag_6': t * 2.0, 'lag_12': t / 3.0,
+                'net_lag_3': t * 3.0, 'branch_lag_3': 30, 'stock_start': 3,
+                'base_price': float(base_price or 80000.0), 'season_month': int(season_month or 1),
+                'brand': str(brand or 'HONDA').upper(), 'vehicle_category': str(vehicle_category or 'Scooter'),
+            }), 2)
+
+        if self.inventory_velocity_model is not None:
+            try:
+                feat_df = pd.DataFrame([{
+                    'brand': str(brand or 'HONDA').upper(),
+                    'vehicle_category': str(vehicle_category or 'Scooter'),
+                    'base_price': float(base_price or 80000.0),
+                    'branch_name': str(branch_name or 'LALA').upper(),
+                    'avg_days_on_lot': float(avg_days_on_lot or 15.0),
+                    'trailing_sales_count': int(trailing_sales_count or 0),
+                    'season_month': int(season_month or 1)
+                }])
+                pred = float(self.inventory_velocity_model.predict(feat_df)[0])
+                return max(0.25, round(pred, 2))
+            except Exception:
+                pass
+
+        # Heuristic fallback if model not loaded
+        monthly_base = max(0.25, trailing_sales_count / 3.0)
+        return round(monthly_base, 2)
 
     def extract_features(self, account: Dict[str, Any]) -> pd.DataFrame:
         """Extracts engineered feature vector for Model 1 and Model 3."""
@@ -275,3 +343,32 @@ class ModelRegistry:
         elif overdue == 0 and paid >= 6:
             return 0.55
         return 0.10
+
+    def predict_lifecycle_outcome(self, account: Dict[str, Any]) -> str:
+        """
+        Predicts whether loan will conclude as 'completed', 'early_settled', or 'defaulted'.
+        """
+        if self.lifecycle_outcome_model is not None:
+            try:
+                df = self.extract_features(account)
+                pred = str(self.lifecycle_outcome_model.predict(df)[0])
+                return pred
+            except Exception:
+                pass
+        overdue = int(account.get('overdue_count') or 0)
+        if overdue >= 2:
+            return 'defaulted'
+        return 'completed'
+
+    def predict_cash_realization(self, account: Dict[str, Any]) -> float:
+        """
+        Predicts expected cash realization rate (0.50 to 1.10).
+        """
+        if self.cash_realization_model is not None:
+            try:
+                df = self.extract_features(account)
+                pred = float(self.cash_realization_model.predict(df)[0])
+                return max(0.50, min(1.15, round(pred, 4)))
+            except Exception:
+                pass
+        return 0.925

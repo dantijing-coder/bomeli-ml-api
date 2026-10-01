@@ -1,0 +1,1058 @@
+================================================================================
+            BOMELI MOTOR TRADING - HOW THE AI WORKS (PLAIN-LANGUAGE GUIDE)
+                   Matches pages/ai-sales-insights.php and ml_engine/
+                              Updated: 2026-10-02
+================================================================================
+
+WHAT THIS IS
+  A plain explanation of every prediction on the AI Sales & Cashflow Insights
+  page: what question it answers, what it looks at, why we picked that method,
+  how accurate it is, and what it does when there is too little data.
+  Technical names are given once per model ("Technical name:") in case a
+  panelist asks. Everything else is in everyday words.
+
+CONTENTS
+  1. The one rule behind everything
+  2. The models at a glance
+  3. Why tree-based models (and not neural networks)
+  4. Model by model
+       M1  Default risk (who might stop paying)
+       M2  Early payoff (who might settle early)
+       M3  Stock sales pace (when a model will run out)
+       M4  Collections forecast (how much cash comes in)
+       M5  Loan lifecycle (how loans usually end, by term length)
+       M6  Payment behavior (how borrowers move between on time / behind / stopped)
+       M7  Branch expansion (where the next branch should go)
+       M8  Monthly sales forecast (units sold per month, 1-12 months ahead)
+       R   Rules layer (tiers and action buttons)
+  5. What happens when a new branch opens
+  6. Accuracy scorecard (+ test-set sizes, + live backtest MAE)
+  7. Panel Q&A
+  8. Known limits (say these before someone else does)
+  9. How the charts show the current month and the 2-month outlook
+
+
+================================================================================
+1. THE ONE RULE BEHIND EVERYTHING
+================================================================================
+
+  TRAIN ON PRACTICE DATA, USE ON REAL DATA.
+
+  - Every model learns from SIMULATED ("practice") data that we generated to
+    look like a Philippine motorcycle-financing business: thousands of
+    borrowers, payments, stock movements and towns.
+  - The models are then run on our REAL records (MySQL) to make predictions.
+  - Real records are used to CHECK the models, never to teach them.
+
+  Why: our real history is still small (a few hundred accounts, three
+  branches). A model that learns from so little just memorises it. Practice
+  data gives the model enough examples to learn the general patterns (e.g.
+  "people with a high debt-to-income ratio miss more payments"). Where the
+  practice data's scale does not match ours (for example simulated towns
+  producing many more clients), we rescale the output to our real numbers.
+  M3 and M7 do this explicitly.
+
+  Where you can re-train:
+    train_models.py            -> M1, M2, M4, M5 (and the unused M6 classifiers)
+    train_velocity_model.py    -> M3
+    train_sales_forecast_model.py -> M8 (horizon sales forecast)
+    train_branch_expansion.py  -> M7 (also re-run automatically after every
+                                  "Run AI" and after the history replay)
+
+
+================================================================================
+2. THE MODELS AT A GLANCE
+================================================================================
+
++----+---------------------------+----------------------------------+---------------------------+
+| #  | Question it answers       | Where on the page                | Method (plain)            |
++----+---------------------------+----------------------------------+---------------------------+
+| M1 | Will this borrower stop   | Risk tab: Watchlist, risk %,     | Learned model (many       |
+|    | paying in the next 90     | URGENT/HIGH/MONITOR badges       | decision trees) + a       |
+|    | days?                     |                                  | correction so % are honest|
+| M2 | Will this borrower pay    | Operations tab: Early Payoff     | Learned model (many       |
+|    | off early?                | Candidates                       | decision trees)           |
+| M3 | How many units of each    | Sales & Stock tab: How Fast Each | Learned counting model    |
+|    | model will a branch sell  | Model Sells (top 4 models trend  | (many decision trees)     |
+|    | next month?               | + full table), restock advice    |                           |
+| M4 | How much cash will we     | Collections tab: Money Received, | Installment schedule x a  |
+|    | actually collect?         | Payments chart (+2 months),      | learned "how much really  |
+|    |                           | Collected This Month card        | comes in" rate            |
+| M5 | How do 12/24/36-month     | Risk tab: Multi-term benchmarks, | Learned model per account,|
+|    | loans usually end?        | lifecycle distribution           | fixed table as backup     |
+| M6 | How many borrowers slip,  | Borrower Health tab: Portfolio   | Learned 3-in-1 model      |
+|    | catch up, or stop paying? | Health (incl. 2-month forecast), | (HistGBT) per account +   |
+|    |                           | What To Expect, Branch Comparison| ledger count tracking     |
+| M7 | Where should the next     | Branch Expansion tab (upper      | Two learned models +      |
+|    | branch go?                | management only)                 | a 0-100 score             |
+| M8 | How many units will we    | Sales & Stock tab: Sales This    | Learned counting model    |
+|    | sell next month? (whole   | Month chart; its forecast BECOMES| (many decision trees,     |
+|    | network or per branch)    | next month's sales goal          | Poisson loss)             |
+| R  | What should staff do?     | Action buttons, "Next actions"   | Fixed business rules      |
+|    |                           | cards                            |                           |
++----+---------------------------+----------------------------------+---------------------------+
+
+  Simple text pieces (the AI briefing paragraph, "what this tells us" bullets)
+  are written by templates that fill in the numbers above. They do not
+  predict anything on their own.
+
+
+================================================================================
+3. WHY TREE-BASED MODELS (AND NOT NEURAL NETWORKS)
+================================================================================
+
+  Almost every learned model here is a "gradient-boosted decision tree"
+  model. In plain words: a long list of small yes/no rule trees ("Is
+  debt-to-income above 35%? Are 2+ terms overdue?"), where each new tree fixes
+  the mistakes of the ones before it.
+
+  Why we chose it:
+  1. Our data is a table (rows = borrowers, columns = income, overdue terms,
+     etc.). On table data, tree models are usually as accurate as neural
+     networks, or more accurate, and much simpler to run.
+  2. It handles mixed data (numbers + categories like "OFW" or "Rented")
+     without heavy preparation, and it copes with missing values.
+  3. It picks up "combination" effects on its own (high debt AND short time
+     at address is worse than either alone).
+  4. It is small and fast: all models together load in a few MB and score
+     the whole portfolio in well under a second on an ordinary server. No
+     graphics card needed.
+  5. It can be explained: we can show which inputs push a prediction up or
+     down.
+
+  Technical name: HistGradientBoostingClassifier / HistGradientBoostingRegressor
+  (scikit-learn).
+
+  The only exception is the town-demand part of M7, which uses a simpler
+  "counting" formula (see M7) because it has very few rows to learn from.
+
+
+================================================================================
+4. MODEL BY MODEL
+================================================================================
+
+--------------------------------------------------------------------------------
+M1. DEFAULT RISK - "Will this borrower stop paying in the next 90 days?"
+--------------------------------------------------------------------------------
+  Where: Risk tab -> Account Watchlist (the risk % per borrower), the priority
+         badges, and the action buttons next to each account.
+
+  What it looks at (per borrower):
+    - how far into the loan they are (terms paid / total terms)
+    - debt-to-income (monthly amortization / monthly income)
+    - on-time streak (months in a row paid on time, earning the rebate)
+    - late streak and number of terms currently overdue
+    - how often they pay only part of the amount
+    - on-time reliability (share of due dates paid on time)
+    - credit-investigation red flags, unreachable phone number
+    - years at current address
+    - job type (employed, self-employed, OFW, transport)
+    - home ownership (owned, mortgaged, rented)
+
+  How it works: the tree model gives each borrower a raw score. A second step
+  then adjusts that score so it can be read as a real chance. After this step,
+  among borrowers shown as "70%", roughly 7 in 10 would be expected to stop
+  paying.
+
+  Why this method:
+    - Tree model: reasons in Section 3.
+    - The adjustment step: raw tree scores are good at ORDERING borrowers
+      (who is riskier) but the numbers themselves are not true percentages.
+      Staff act on the percentage, so it has to mean what it says.
+
+  Risk tiers used by "Run AI" (live):
+    70% and up  -> Critical -> "Schedule Field Visit"
+    45% - 69%   -> High     -> "Send Follow-Up SMS" (with waiver offer)
+    20% - 44%   -> Moderate -> "Send Reminder SMS"
+    below 20%   -> Low      -> no action
+  (The history replay uses 70 / 40 / 15. See Section 8.)
+
+  If the model file is missing: a simple rule by overdue terms
+  (3+ -> 85%, 2 -> 55%, 1 -> 25%, 0 -> 1.5%).
+
+  Accuracy (on practice data the model never saw, 700 borrowers):
+    85.4% correct | 84.3% balanced (fair to both groups) | ranking score 0.86
+    (1.0 = perfect ranking, 0.5 = coin toss)
+
+  Technical name: HistGradientBoostingClassifier + CalibratedClassifierCV
+  (sigmoid, 3-fold). File: models/default_hazard_model.joblib
+
+
+--------------------------------------------------------------------------------
+M2. EARLY PAYOFF - "Will this borrower settle the loan early?"
+--------------------------------------------------------------------------------
+  Where: Operations tab -> Early Payoff Candidates; "Send Early Payoff Quote".
+
+  Background: under the Option Contract, borrowers who have paid on time can
+  settle early with an interest discount. Settling early brings in cash
+  sooner, so it pays to know who is likely to do it.
+
+  What it looks at: how far into the loan, on-time reliability,
+  debt-to-income, on-time streak, overdue terms, monthly income, job type,
+  home ownership.
+
+  How a borrower becomes a candidate:
+    - model chance is 65% or more, OR
+    - they are in an option window (terms 10-12 or 22-24) with 85%+ on-time
+    HIGH if on-time is 92%+, otherwise MEDIUM.
+  Candidates are then ranked by a "payoff readiness" number:
+    model chance x (0.55 + 0.45 x share of loan already paid) x (0.6 if behind)
+
+  Why the extra ranking step: the model gives many steady payers almost the
+  same score. Someone with 3 terms left is far more likely to settle now
+  than someone with 20 left, so we weight by progress.
+
+  Why a tree model: same reasons as M1. It was trained with "balanced"
+  weighting because early payoffs are rare. Without it the model could
+  score well by always saying "no".
+
+  Accuracy (700 unseen practice borrowers):
+    88.9% correct | 94.2% balanced | ranking score 0.97
+
+  Technical name: HistGradientBoostingClassifier (class_weight balanced).
+  File: models/early_settlement_model.joblib
+
+
+--------------------------------------------------------------------------------
+M3. STOCK SALES PACE - "How many of this model will this branch sell?"
+--------------------------------------------------------------------------------
+  Where: Sales & Stock tab -> How Fast Each Model Sells. Trend view: the 4
+         best-selling models, last 2 months + this month + 2-month forecast.
+         Table view: every model with stock on hand and how long it lasts.
+         Also restock / transfer advice in Recommended Actions.
+
+  What it looks at (for one motorcycle model at one branch):
+    - units sold last month, last 3 months, last 6 months, same month last year
+    - units of this model sold across ALL branches in the last 3 months
+    - units of ALL models sold at this branch in the last 3 months (foot traffic)
+    - units on the floor at the start of the month
+    - price, brand, calendar month
+
+  How it works: predicts the expected number of units sold next month. Then:
+    stock lasts about = units in stock / (predicted monthly units / 30) days
+    Running out: 7 days or less | Low: 8-21 days | Enough: over 21 days
+  A branch low on a model is paired with a branch that has slow-moving stock
+  of the same model for a transfer suggestion.
+
+  The 2-month forecast on the trend chart: each forecast month takes M8's
+  total sales forecast and splits it across models by each model's share of
+  M3's next-month prediction. So the model lines always add up to the Sales
+  This Month forecast instead of telling a different story.
+  (dml/forecast_helpers.py -> forecast_models_by_month; stored per model as
+  forecast_by_month.)
+
+  Why this method (version 2, replaced the old decision-tree version):
+    - The old version learned from practice data where a model sold ~13
+      units a quarter per branch. We actually sell 0-3. At our scale it
+      predicted about 2.2 for almost everything. So:
+    - Practice data was rebuilt at OUR scale (~10 units a month for the
+      whole network; most model-branch-months sell zero).
+    - It uses a "counting" setup made for small whole numbers (0, 1, 2...),
+      which never predicts negative sales and handles lots of zeros well.
+    - It uses real recent sales (lags) instead of a fixed branch name, so it
+      works for any branch, including a new one.
+
+  Accuracy:
+    Practice data (6,000 unseen model-months):
+      average miss (MAE) 0.24 units per model per branch per month
+      (repeating last month's sales misses by about the same, 0.24)
+    Real sales history (check only, never used for training, 1,096 rows):
+      average miss 0.32 units vs 0.34 for the last-3-month average
+    Its bigger advantage is fewer wild misses. Its error score that punishes
+    predicting sales where there were none (and missing spikes) is about 4x
+    lower than the simple average (practice 0.53 vs 2.06; real 0.79 vs 3.31).
+
+  Technical name: HistGradientBoostingRegressor (loss = Poisson).
+  File: models/inventory_velocity_model.joblib (version 2)
+
+
+--------------------------------------------------------------------------------
+M4. COLLECTIONS FORECAST - "How much cash will we actually collect?"
+--------------------------------------------------------------------------------
+  Where: Collections tab -> Money Received This Month, Payments: Recent
+         Months & Next 2 Months chart, Collected This Month card (top),
+         History tab -> Amount Due vs Amount Received.
+
+  How it works (two parts):
+    1. The contract schedule: the exact installments due this month, added up
+       from installment_schedule in the database. This is the "Due this
+       month" figure everywhere on the page. It is fact, not a guess.
+       (Fixed 2026-10-01: the live engine used to add up every loan's monthly
+       amortization instead. That counted new loans with nothing due yet and
+       missed loans with two installments due, e.g. Oct 2026 showed P1,108,136
+       instead of the real P1,165,547. Both pipelines now use the schedule.)
+       "Could be collected" = the schedule minus installments on units that
+       were already repossessed (they will not be paid).
+    2. A learned "realization rate": what share of that schedule really comes
+       in, and a "stress factor" for the bad case. It is predicted from the
+       portfolio's make-up: share of accounts on time / behind / stopped,
+       average debt-to-income, average on-time reliability, how far into
+       their loans people are, how many accounts are new, recent catch-up
+       rate, month of the year, expected sales.
+    Expected = schedule x realization rate (kept between 85% and 105%).
+    Worst case uses the stress factor (kept between 75% and 95%).
+    Next months = booked schedule x realization rate
+                  + first installments from motorcycles we expect to sell
+                    (the units come from M8's sales forecast).
+    Best case +8% and worst case -12% are stored around it.
+
+  Why this method:
+    - Starting from the real schedule means the forecast can never invent
+      money that is not owed.
+    - Collections depend on portfolio health and season (13th-month pay in
+      Nov-Dec, tuition dip in June). A fixed "we collect 88%" number misses
+      that, so a learned rate replaced the fixed one.
+
+  Payments are sorted into streams by simple rules: regular, advance
+  (1.5x+ the amortization), partial (under 85%), early settlement (notes
+  mention option contract / buyout).
+
+  If the model is missing: fixed 88% stress factor and rule-based rate.
+
+  Accuracy (800 unseen practice portfolio snapshots):
+    realization rate explains 94.4% of the variation, average miss 1.9 points
+    stress factor explains 93.8%, average miss 1.5 points
+
+  Technical name: two HistGradientBoostingRegressors (realization + stress).
+  File: models/cash_forecast_model.joblib
+
+
+--------------------------------------------------------------------------------
+M5. LOAN LIFECYCLE - "How do 12 / 24 / 36-month loans usually end?"
+--------------------------------------------------------------------------------
+  Where: Risk tab -> Multi-term benchmarks, active lifecycle distribution.
+
+  How it works: for each account, a model predicts how the loan will end
+  (completed, settled early, or defaulted) and how much of it will be
+  completed. Results are averaged per term length (12, 24, 36 months). Each
+  account is also placed in a phase: early risk (terms 1-4), option window,
+  steady middle, or final stretch.
+
+  Why this method: a fixed table says the same thing for every portfolio.
+  Predicting per account means the benchmark reflects OUR borrowers.
+
+  If there are no accounts or the model is missing: a fixed reference table
+  (completion 85.4% / 81.6% / 77.8% for 12 / 24 / 36 months).
+
+  Note: the "risk driver" pills (e.g. "Partial payments 3.15x") are fixed
+  reference figures written into the code. They are not calculated from our
+  data.
+
+  Accuracy (800 unseen practice loans):
+    default detector 85.0% correct (85.8% balanced)
+    early-settlement detector 72.8% correct
+    completion share: explains 78.3% of the variation, average miss 2.6 points
+
+  Technical name: HistGradientBoosting classifiers + regressor.
+  File: models/survival_analysis_model.joblib
+
+
+--------------------------------------------------------------------------------
+M6. PAYMENT BEHAVIOR - "How many slip, catch up, or stop paying?"
+--------------------------------------------------------------------------------
+  Where: Borrower Health tab -> What To Expect Next Month (3 rows), Branch
+         Comparison, and the 2-month forecast on the Portfolio Health chart.
+
+  Status definitions (from the payment ledger):
+    On time = 0 terms overdue | Behind = 1-2 overdue | Stopped paying = 3+
+
+  How it works:
+    This engine uses the trained 3-in-1 Machine Learning Markov Transition
+    Ensemble (HistGradientBoostingClassifier models):
+    - Model 4a (Slip Classifier): Predicts individual P(Active -> Delinquent)
+      for every on-time borrower from their DTI, rebate streak, arrears,
+      contract progress, and on-time reliability.
+    - Model 4b (Roll Classifier): Predicts individual P(Delinquent -> Default)
+      for every late borrower.
+    - Model 4c (Cure Classifier): Predicts individual P(Delinquent -> Catch Up)
+      for every late borrower.
+
+    The pipeline runs these in vectorized batches across all active and late
+    borrowers in under 25 milliseconds, with zero lag to the user workflow.
+    The cohort averages produce the live rates shown in the 3 boxes.
+
+  Real ledger tracking & safety fallback:
+    Alongside the ML predictions, the system records the real start-of-month
+    entering counts (active_start and delinquent_start). If live account data is
+    missing or the model file is absent, it falls back gracefully to
+    Bayesian-smoothed ledger transition rates.
+
+  Portfolio Health 2-month forecast (line chart: on time / behind / default):
+    This month's counts are rolled forward one month at a time with the three
+    rates above:
+      on time next = on time x (1 - slip) + behind x catch-up + new buyers
+      behind next  = on time x slip + behind x (1 - default - catch-up)
+      default next = default + behind x default
+    "New buyers" = installment sales expected from M8's forecast (they start
+    as on time). Default is treated as permanent (nobody leaves it).
+    (dml/forecast_helpers.py -> project_portfolio_health; stored as
+    health_forecast.)
+
+  Accuracy (practice data test, unseen; balanced accuracy):
+    Slip 90.8% | Roll to default 92.0% | Catch-up 93.0%
+    Blended balanced accuracy: 91.9%  (source: benchmark_report.json)
+    Live backtest (real data): predicted vs actual number of borrowers making
+    each move, last 12 closed months: MAE about 3 borrowers per move per month
+    (all branches). Shown in the "Model accuracy (MAE)" popup.
+
+  Technical name: 3-in-1 HistGradientBoostingClassifier ensemble.
+  File: models/markov_transition_model.joblib
+
+
+--------------------------------------------------------------------------------
+M7. BRANCH EXPANSION - "Where should the next branch go?" (3-year plan)
+--------------------------------------------------------------------------------
+  Where: Branch Expansion tab (upper management only). It covers the whole
+  network. The month and branch filters do not change it.
+
+  Step 1 - Where do clients live?
+    Every live client is matched to a town using the city on their customer
+    profile. Clients are grouped by where they LIVE, not by which branch sold
+    to them. City values we cannot recognise are listed under "client records
+    have a town we can't recognize". Fixing the profile makes them count.
+
+  Step 2 - Enough evidence?
+    Each town gets one label:
+      Has a branch        -> a branch in the branches table is named after it
+      Close to a branch   -> its clients live under 5 km from a branch
+      Too early to tell   -> under 20 clients OR under 12 months of history
+                             (shown with progress bars, no score)
+      Checked             -> 20+ clients over 12+ months: scored in Step 3
+    No ranking is shown for a town with too little real data.
+
+  Step 3 - Score 0-100 (only for "Checked" towns). Five parts, each ranked
+  against the other checked towns AND our current branch towns (so a single
+  candidate does not get 100 by default):
+      35%  new clients a branch would ADD (with branch minus today)
+      25%  repayment quality (lower predicted default = better)
+      15%  growth (last 12 months vs the 12 before)
+      15%  local market (commerce + banking scores)
+      10%  distance from existing branches (farther = more underserved)
+    70+ Recommended | 45-69 Worth watching | under 45 Not recommended yet
+
+  Step 4 - 3-year projection:
+    Today's yearly new clients, plus the extra a branch would bring, ramping
+    up 60% -> 85% -> 100% over years 1-3, with growth capped at +/-15% a year.
+
+  The two learned models behind Step 3:
+    a) Credit model: "how likely is a borrower here to default?" It looks at
+       distance and travel time to the branch, road quality, income,
+       debt-to-income, down payment %, term, engine size, job sector, and
+       whether they moved address. Payment history is NOT an input, so the
+       model cannot simply read the answer.
+       Used twice per town: once with today's distance, once as if a branch
+       were in town. The difference shows how a local branch changes risk.
+       Why a tree model: same reasons as Section 3.
+       Accuracy (800 unseen practice borrowers): ranking score 0.97,
+       91.5% balanced.
+       Technical name: HistGradientBoostingClassifier (balanced).
+
+    b) Demand model: "how many new borrowers per year would a town produce?"
+       It looks at population, commerce, banking, road quality and distance
+       to the nearest branch.
+       Why a simpler model here: there are only 36 town-year rows to learn
+       from. A tree model would memorise them. This is a straight "counting"
+       formula that always gives a positive whole-number-style answer and
+       shows plainly which factor matters (bigger population and shorter
+       distance -> more borrowers).
+       Accuracy: tested by hiding one town at a time and predicting it.
+       Median miss 21%, average miss 29 borrowers a year.
+       Technical name: Poisson regression (PoissonRegressor, standardized).
+
+  Rescaling to our reality (important):
+    The practice towns produce far more clients than ours. The models are
+    rescaled using our existing branch towns as the yardstick:
+      demand  x (our branch towns' real new clients / model's prediction)
+      risk    x (our branch towns' real default share / model's prediction)
+    Latest run: simulated towns ~244 clients/yr vs ours ~35 (scale 0.15);
+    simulated default 19.7% vs ours 6.0% (scale 0.30).
+    The models provide the RELATIVE effects (distance, market, income). Our
+    own branches set the actual size.
+
+  Latest run (numbers change each run): Aurora is "Recommended" at 82.5/100,
+  with 39 clients living about 26 km from Kapatagan. Salvador, Sapad and
+  Sultan Naga Dimaporo are "Too early to tell". Baroy is "Close to a branch"
+  (Tubod).
+
+  Files: train_branch_expansion.py -> models/branch_expansion_model.joblib
+         and models/branch_expansion_report.json (the page reads the report).
+  (models/expansion_model.joblib and expansion_feasibility_data.json are
+  leftovers from an older version and are not read by anything.)
+
+
+--------------------------------------------------------------------------------
+M8. MONTHLY SALES FORECAST - "How many units will we sell next month?"
+    (1-12 months ahead, per branch or network)
+--------------------------------------------------------------------------------
+  Where: Sales & Stock tab -> Sales This Month (chart: last 2 months, this
+         month, next 2 months) and the Motorcycles Sold card at the top.
+         It is LIVE in both pipelines (run_predictive_engine.py and the
+         history replay).
+
+  What it looks at (for one branch, or the whole network):
+    - units this month (the "anchor"): what is already sold, or 80% of this
+      month's goal if that is higher (see "How the goal is set" below)
+    - units last month and two months ago
+    - average units over the last 3, 6 and 12 months
+    - units in the same calendar month one year earlier
+    - months ahead (1 = next month ... 12)
+    - calendar month being forecast, and the season of both months
+  Label (what it predicts): motorcycles sold in the target month.
+
+  How the goal is set (this is what the panel sees as "the goal"):
+    1. This month is assumed to close at 80% of its goal, or at what is
+       already sold if that is higher. (TARGET_ATTAINMENT = 0.80 in
+       dml/forecast_helpers.py; a business setting, not learned.)
+    2. M8 forecasts the next 2 months from that.
+    3. Next month's forecast BECOMES next month's goal (the engine carries
+       it forward when the new month starts). So beating this month's goal
+       raises next month's goal; while the month is still running, a slow
+       start is counted as 80% of the goal, not as zero.
+    If there is no forecast from last month (the very first month, or a new
+    branch), the goal falls back to a simple seasonal formula (live engine:
+    last 90 days' sales / 3 x season; history replay: a fixed base x season).
+
+  Why this method:
+    - Monthly sales are small whole numbers (0-20). Poisson loss never
+      predicts negative sales and is built for counts.
+    - Trees learn momentum + season together (e.g. "a strong last month in
+      November means a strong December"), which the old seasonal rule could
+      not.
+    - Uses only sales history, not a branch name, so it works for a new
+      branch too.
+    - If the model file is missing, the engine falls back to the old
+      seasonal rule. Each forecast row records which one it used
+      (units_source = model / seasonal_rule).
+
+  How it was trained (train_sales_forecast_model.py):
+    M3's practice sales data, added up into monthly totals per branch and
+    for the whole network. Trained on 63,360 rows (1 to 12 months ahead, so
+    the engine can forecast to December). Tested on 3,120 unseen forecasts
+    1-2 months ahead, the same horizons the page shows.
+
+  Accuracy (benchmark_report.json):
+    Practice data, 3,120 unseen forecasts (1-2 months ahead):
+      MAE 2.15 units vs 2.43 for the old seasonal rule  (model better)
+      next month 2.15 | 2 months ahead 2.16 | within +/-2 units: 68.5%
+    Our real sales history, 1-2 months ahead (260 forecasts, used ONLY to
+    check, never to train):
+      MAE 0.80 units vs 0.84 for the seasonal rule  (model better)
+      within +/-2 units: 93.9%
+    Further ahead (6-12 months) the simple rule is better on our real data
+    (all horizons: 0.83 vs 0.76). The page only shows 2 months ahead.
+    Real errors are smaller than practice errors only because our branches
+    sell fewer units (about 5 a month per branch), not because the model is
+    "better on real data".
+    Live backtest in the popup: month's goal vs units actually sold,
+    last 12 closed months: MAE about 2 units a month (all branches). Months
+    before this change still carry the old formula goals until the history
+    replay is re-run.
+
+  Technical name: Poisson HistGradientBoostingRegressor.
+  Files: models/sales_forecast_model.joblib, dml/sales_forecast.py (shared
+  feature code), train_sales_forecast_model.py (retrain; run it AFTER
+  train_velocity_model.py, which creates the practice data).
+
+
+--------------------------------------------------------------------------------
+R. RULES LAYER - tiers and action buttons (not learned, on purpose)
+--------------------------------------------------------------------------------
+  Turns predictions into staff actions:
+    Critical risk / 3+ overdue      -> Schedule Field Visit
+    High risk / 2 overdue           -> Send Follow-Up / Demand SMS + waiver
+    Moderate risk / 1 overdue       -> Send Reminder SMS
+    Early payoff candidate          -> Send Early Payoff Quote
+    Stock running low               -> Log Stock Transfer Request
+  Why rules and not a model: staff need to know exactly why an action was
+  suggested, and the thresholds are business decisions management can
+  change. They are not something to learn from data.
+
+
+--------------------------------------------------------------------------------
+USED ONLY BY THE HISTORY REPLAY (run_walk_forward_pipeline.py)
+--------------------------------------------------------------------------------
+  The replay goes month by month through imported history to test the
+  forecasts. Besides M1-M3 it also uses:
+    - Lifecycle outcome model (completed / early / defaulted per account):
+      90.7% correct, 80.1% balanced.  File: lifecycle_outcome_model.joblib
+    - Per-account cash realization model: explains 92.9% of variation,
+      average miss 3.2 points.        File: cash_realization_model.joblib
+      The replay's collection rate = 60% model + 40% real collection rate so
+      far, reduced slightly when many accounts are behind.
+  "Run AI" (run_predictive_engine.py) does not use these two.
+
+
+================================================================================
+5. WHAT HAPPENS WHEN A NEW BRANCH OPENS
+================================================================================
+
+  Nothing changes until BOTH of these happen:
+    1. The branch is added to the branches table, and its name contains the
+       town's name (e.g. "Aurora" or "Aurora Branch"). The town is found by
+       matching the name. A name like "Bomeli Branch 4" will NOT be
+       recognised as a branch town.
+    2. "Run AI" (or the history replay) runs again. The expansion report is
+       rebuilt at the end of every run.
+
+  Branch Expansion tab:
+    - The town is NOT removed. It moves from "Towns without a branch" to
+      "Towns with a branch", with its full client history (because clients
+      are grouped by where they live). Years before the opening therefore
+      appear as branch-town history.
+    - It loses its score card. Only towns without a branch are scored. Its
+      projection changes from the ramp-up projection to "last 12 months x
+      trend".
+    - It becomes part of the yardstick: the dotted "typical branch town"
+      line, the "Stopped paying" figure, and the rescaling in M7. A young
+      branch with fewer clients pulls the yardstick down, so predictions for
+      the remaining towns shift.
+    - If it was the only checked town, the top message changes to "Not enough
+      live data to recommend a new branch yet" until another town reaches
+      20 clients / 12 months.
+    - LIMIT: distances and "nearest branch" come from a fixed town list, not
+      from the branches table. Nearby towns keep showing the old distance
+      (e.g. "12.9 km to Kapatagan") and will not switch to "Close to a
+      branch" until that list is updated.
+
+  Other tabs:
+    - The branch appears in the branch filter automatically.
+    - It gets its own view only once it has accounts or collections.
+      Before that, "Run AI" skips it.
+    - Payment behavior (M6) shows figures close to the company baseline at
+      first (the "+5 typical accounts" steadying) and moves toward its own
+      numbers as accounts build up.
+    - Stock pace (M3) has no sales history for it, so it predicts slow sales
+      at first. New stock shows a long runway and restock alerts will not
+      fire for the first few months.
+    - Default risk and early payoff (M1, M2) are per borrower, so the branch
+      makes no difference.
+    - The collections model (M4) was trained on LALA / KAPATAGAN / TUBOD. It
+      ignores an unfamiliar branch name safely and uses the portfolio figures.
+
+
+================================================================================
+6. ACCURACY SCORECARD (RANDOMIZED 80/20 UNBIASED HOLDOUT BENCHMARK)
+================================================================================
+  Evaluation Protocol:
+  - Every model: 80% of its practice data to train, 20% held back to test.
+    The test data is never seen during training.
+  - STRICTLY ZERO DATABASE WRITES: pure in-memory execution to preserve all live
+    financial ledgers, cashier records, and portfolio histories.
+  - Source: models/benchmark_report.json (generated from simulated datasets).
+
+  TEST SET SIZES (what the popup shows):
+      700 unseen borrowers           M1, M2, M5 lifecycle
+      800 unseen portfolio snapshots M4 collections; 800 borrowers M9
+      6,000 unseen model-months      M3 sales per model
+      3,120 unseen forecasts         M8 sales forecast, 1-2 months ahead
+                                     (only the horizons the page shows)
+    Why the sales numbers are larger: one row there is one month of sales,
+    not one borrower, so the same 20% gives more rows.
+    If asked how the sales data was split: the held-back 20% is whole
+    practice dealerships the model never saw (12 of 60), so it cannot peek
+    at other months of the same dealership.
+
++-------------------------------+-----------------------------------------------+---------------------------------------+
+| Model                         | Core Accuracy & Performance Metrics           | Unvarnished Error / Tolerance Metric  |
++-------------------------------+-----------------------------------------------+---------------------------------------+
+| M1 Default Hazard Classifier  | 84.71% Accuracy | 83.62% Balanced Acc         | Precision: 83.52% | Recall: 91.25%    |
+| (90-day default prediction)   | ROC-AUC: 0.8470 | F1-Score: 0.8722            | FP: 72 false alarms | FN: 35 misses   |
+|                               | (Train: 2,800 rows / Test: 700 rows)          | TN: 228 | TP: 365                     |
++-------------------------------+-----------------------------------------------+---------------------------------------+
+| M2 Early Payoff Propensity    | 87.14% Accuracy | 93.33% Balanced Acc         | Precision: 21.74% | Recall: 100.0%    |
+| (Option contract buyout)      | ROC-AUC: 0.9618 | F1-Score: 0.3571            | FP: 90 false alarms | FN: 0 misses    |
+|                               | (Train: 2,800 rows / Test: 700 rows)          | TN: 585 | TP: 25                      |
++-------------------------------+-----------------------------------------------+---------------------------------------+
+| M3 Inventory Sales Velocity   | MAE: 0.2410 units/month | RMSE: 0.4085 units  | 97.55% predictions within ±1 unit     |
+| (Showroom restock pacing)     | Poisson Deviance: 0.5372 (vs Naive 3.3873)    | Naive Baseline MAE: 0.2438 units      |
+|                               | (Train: 25,000 rows / Test: 6,000 rows)       | Poisson deviance reduced by 84.1%     |
++-------------------------------+-----------------------------------------------+---------------------------------------+
+| M4 Contract Lifecycle Outcome | 87.00% Overall Multi-Class Accuracy           | Confusion localized between full 12mo |
+| (Completed / Default / Early) | 79.41% Balanced Multi-Class Accuracy          | completions vs late month 10-12       |
+|                               | (Train: 2,800 rows / Test: 700 rows)          | option buyouts due to identical traits|
++-------------------------------+-----------------------------------------------+---------------------------------------+
+| M5 Portfolio Cash Forecast    | Normal Realization R²: 95.07% | MAE: 0.0192   | Average error is ~1.9 percentage pts  |
+| (Dual Cash & Stress Engine)   | Stressed Realization R²: 94.71% | MAE: 0.0130 | Average stress error is ~1.3 points   |
+|                               | (Train: 3,200 rows / Test: 800 rows)          | Captures seasonal cycles accurately   |
++-------------------------------+-----------------------------------------------+---------------------------------------+
+| M6 Markov State Transitions   | Slip (Active->Delinquent): 90.79% Balanced    | Blended Balanced Accuracy: 91.90%     |
+| (Slip, Roll, Cure Ensemble)   | Roll (Delinquent->Default): 91.96% Balanced   | High variance on accounts with 1 term |
+|                               | Cure (Delinquent->Cure): 92.95% Balanced      | overdue paying partial amounts        |
+|                               | (Train: 4,000 rows / Test: 1,000 rows)        |                                       |
++-------------------------------+-----------------------------------------------+---------------------------------------+
+| M7 Loan Survival Cascade      | Default Detector: 85.29% Balanced Accuracy    | Completion Share R²: 76.53%           |
+| (Tenor Survival & Completion) | Overall Binary Accuracy: 84.75%               | MAE: 0.0266 (2.66 percentage points)  |
+|                               | (Train: 3,200 rows / Test: 800 rows)          | Accurately models hazard hill (mo 2-5)|
++-------------------------------+-----------------------------------------------+---------------------------------------+
+| M8 Monthly Sales Forecast     | MAE 2.15 units, 1-2 months ahead (rule 2.43)  | Real data, 1-2 months ahead:          |
+| (sets next month's goal)      | Next month 2.15 | 2 months ahead 2.16         |   MAE 0.80 (old rule 0.84)            |
+|                               | (Train: 63,360 rows / Test: 3,120 rows)       | Within ±2 units: 68.5% sim, 93.9% real|
++-------------------------------+-----------------------------------------------+---------------------------------------+
+| M9 Branch Expansion Credit    | Cold-Start ROC-AUC: 0.9678                    | Zero payment history used (applicant  |
+| (Geospatial Risk Classifier)  | Balanced Accuracy: 91.39%                     | profile only: distance, roads, income)|
+|                               | (Train: 3,200 rows / Test: 800 rows)          | Road quality & friction are dominant  |
++-------------------------------+-----------------------------------------------+---------------------------------------+
+
+--------------------------------------------------------------------------------
+LIVE BACKTEST MAE (OUR REAL DATA) - "Model accuracy (MAE)" popup on the page
+--------------------------------------------------------------------------------
+  The button next to "This month · live" opens a scoreboard of every model.
+  Besides the practice-data test above, it scores the forecasts the system
+  actually stored against what then happened in our database, last 12 closed
+  months, for the branch selected. Recomputed on every page load.
+  (pages/modals/ai_model_accuracy_modal.php)
+
+  Latest run, all branches (numbers change as months close):
+    Collections:         MAE ~P56,600 a month (~5% of a month's collections)
+    Sales goal:          MAE ~2 units a month (goal vs sold)
+    Sales per model:     MAE ~0.5 units per model per month
+    Borrower movement:   MAE ~3 borrowers per move per month
+  Default risk and early payoff are not scored live: whether a borrower
+  defaults or pays off early is only known months later. Branch expansion
+  needs a new branch to open before it can be checked.
+
+  MAE = mean absolute error = the average size of a miss, in the forecast's
+  own unit. Used for number forecasts. Yes/no models use accuracy and AUC.
+
+--------------------------------------------------------------------------------
+UNVARNISHED REALITY: WHAT THE METRICS ACTUALLY MEAN (NO SUGARCOATING)
+--------------------------------------------------------------------------------
+Here is the blunt, realistic engineering truth about where each model succeeds, 
+where it fails, and why certain scores look the way they do:
+
+1. MODEL 1 (DEFAULT HAZARD): 
+   - Good news: High recall (91.25%) ensures that over 9 out of 10 actual 
+     defaults are caught before they reach terminal repossession status.
+   - The unvarnished catch: 72 false alarms (false positives). Borrowers with 
+     high debt-to-income (>45%) are heavily flagged by the model, yet in real 
+     life, Filipino borrowers often manage high debt burdens through unrecorded 
+     family remittances, seasonal harvests, or neighborhood informal credit. 
+     Staff will occasionally visit a "high-risk" customer who pays immediately.
+
+2. MODEL 2 (EARLY PAYOFF PROPENSITY):
+   - Good news: Balanced accuracy is 93.33%, ROC-AUC is 0.9618, and recall is 
+     100.0% (captured every single one of the 25 early settlements).
+   - The unvarnished catch: F1-score is ONLY 0.3571 and Precision is ONLY 21.74%. 
+     Out of 115 borrowers flagged for early payoff quotes, 90 will NOT buy out. 
+     Why? Extreme real-world class imbalance (only 3.5% of borrowers ever buy out 
+     early). The model accurately detects borrowers who have the financial 
+     CAPACITY to buy out early, but human choice intervenes: most liquid borrowers 
+     deliberately choose to hold cash reserves or invest in inventory rather than 
+     retiring motorcycle installment contracts early. Sending quotes to these 90 
+     costs almost nothing (an SMS), but do NOT expect a 90% conversion rate.
+
+3. MODEL 3 (SHOWROOM VELOCITY):
+   - Good news: Average error is just 0.24 units per month, with 97.55% of all 
+     model-branch monthly predictions falling within ±1 unit of reality. The 
+     Poisson loss function completely prevents absurd negative numbers.
+   - The unvarnished catch: The model is conservative and regression-to-the-mean 
+     oriented. When a sudden dealership promotion, fiesta sale, or fleet order 
+     occurs (e.g. 5 Smash 115s sold in 3 days), the model severely under-predicts 
+     the spike because historical trailing lags cannot foresee sudden marketing 
+     events.
+
+4. MODEL 4 (CONTRACT LIFECYCLE 3-CLASS):
+   - Good news: 87.0% overall accuracy cleanly separates catastrophic early 
+     defaults from full-term contract completions.
+   - The unvarnished catch: Balanced accuracy dips to 79.41% because the model 
+     struggles to tell the difference between a 12-month standard contract that 
+     completes at term 12 vs an account that does an early option buyout at 
+     month 11. Both borrower types have identical rebate streaks, zero arrears, 
+     and near-identical income ratios.
+
+5. MODEL 5 (CASH REALIZATION DUAL REGRESSOR):
+   - Good news: R² of 95.07% (MAE ~1.9%) provides highly reliable monthly 
+     budgeting for branch operations.
+   - The unvarnished catch: It assumes macroeconomic stability. If an external 
+     black-swan shock occurs (e.g. branch temporary closure, severe regional 
+     flooding, or system outage), the model's projected 85% realization rate 
+     will overshoot real cash collections by 20-30%.
+
+6. MODEL 6 (MARKOV TRANSITION ENSEMBLE):
+   - Good news: Blended balanced accuracy across all 3 transition boundaries is 
+     91.90% (Slip: 90.79%, Roll: 91.96%, Cure: 92.95%).
+   - The unvarnished catch: Borrowers who are 1 month overdue and make sporadic, 
+     erratic partial payments (paying 30-50% of the installment) sit directly 
+     on the decision boundary. The model will flip between predicting "Cure" and 
+     "Roll to Default" based on tiny changes in arrears balance.
+
+7. MODEL 7 (SURVIVAL ANALYSIS CASCADE):
+   - Good news: Balanced default detection is 85.29% and completion rate R² is 
+     76.53%. It perfectly reproduces the steep "hazard hill" between months 2-5.
+   - The unvarnished catch: For long 36-month contracts, prediction accuracy 
+     degrades after month 20. Why? Factors outside the initial credit underwriting 
+     (such as motorcycle mechanical breakdowns, road accidents, or unauthorized 
+     sub-leasing) cause late-stage defaults that no intake feature can foresee.
+
+8. MODEL 8 (MONTHLY SALES FORECAST):
+   - Good news: For the 2 months the page shows (next month becomes the
+     goal) it beats the old seasonal rule on both practice data (MAE 2.15 vs
+     2.43) and our real history (0.80 vs 0.84). 94% of real forecasts land
+     within ±2 units.
+   - The unvarnished catch: On our real data the margin over the rule is
+     small, and further ahead (6-12 months) the simple rule is actually
+     better (0.76 vs 0.83 across all horizons). That is why the page only
+     shows 2 months ahead. Only 46% of practice forecasts are within ±1 unit;
+     real errors look smaller because our branches sell few units. Sudden
+     promotions or fleet orders are not anticipated.
+
+9. MODEL 9 (BRANCH EXPANSION GEOSPATIAL CREDIT RISK):
+   - Good news: Tested strictly as a cold-start applicant model (zero payment
+     history used). Achieves 0.9678 ROC-AUC and 91.39% balanced accuracy based
+     on applicant location, travel time to branch, and financial ratios.
+   - The unvarnished catch: Road quality scores and travel times are static GIS
+     estimates. A newly paved highway or a washed-out provincial bridge will
+     radically alter borrower default risk in that municipality without the
+     model knowing until geographic survey data is refreshed.
+
+  How to read the terms:
+    "correct"   = share of predictions that were right.
+    "balanced"  = average of "right on the yes-cases" and "right on the
+                  no-cases". Matters when one outcome is rare.
+    "ranking"   = how well it puts risky ahead of safe (1.0 perfect, 0.5 coin
+                  toss).
+    "explained" = how much of the ups and downs the model accounts for
+                  (100% = all).
+
+
+================================================================================
+7. PANEL Q&A
+================================================================================
+
+Q: What machine learning did you use?
+A: Mostly gradient-boosted decision trees: many small yes/no rule trees,
+   each correcting the last. They cover default risk, early payoff, stock
+   sales pace, the collections rate, loan lifecycle, and the credit part of
+   branch expansion. For town demand we used a simple Poisson (counting)
+   regression because there are only a few dozen town-years to learn from.
+   Business actions come from fixed rules.
+
+Q: Why not deep learning / neural networks?
+A: Our data is a table. On tables, tree models are typically as good or
+   better, train in seconds, run on an ordinary server with no graphics card,
+   and can be explained to staff. A neural network would add cost and
+   memory for no expected gain.
+
+Q: Why train on simulated data?
+A: Our real history is small. Training on it would just memorise a few
+   hundred accounts. We train on realistic practice data, then use real data
+   only to test, so we are never grading the model on its own homework. Where
+   scale differs (sales volume, town size) we rescale to our real numbers.
+
+Q: Why is the default-risk % trustworthy?
+A: Raw tree scores rank borrowers well but are not true percentages. We add
+   a correction step so that, for example, "70%" roughly means 7 in 10 such
+   borrowers would stop paying. Staff act on that number, so it has to mean
+   what it says.
+
+Q: Are the Payment Behavior numbers machine learning?
+A: Yes! The Markov transition roll-rate engine now runs the trained Model 4
+   HistGradientBoosting tree ensemble across active and delinquent borrower cohorts,
+   evaluating DTI, overdue counts, rebate streaks, and payment consistency in
+   under 25ms. When loan counts are small or clean, it seamlessly blends with the
+   calibrated company baseline so predictions stay realistic and never swing wildly.
+
+Q: How does the branch-expansion tab avoid guessing?
+A: A town is only scored after 20+ real clients over 12+ months. Before
+   that it sits on a watchlist with progress bars. The models learn relative
+   effects (distance, market size, income) from practice data, and the size
+   of the prediction is rescaled to what our current branches really
+   produce.
+
+Q: Why is the sales test set 3,120 / 6,000 rows when the others are 700?
+A: Every model is tested on 20% of data it never saw. For borrower models
+   one row is one borrower; for the sales models one row is one month of
+   sales, so the same 20% simply gives more rows. The sales forecast is only
+   scored 1-2 months ahead, because that is all the page shows.
+
+Q: What is MAE and why use it?
+A: Mean absolute error: the average size of a miss, in the same unit as the
+   forecast. "MAE 2 units" means the sales forecast is usually off by about
+   2 motorcycles. It is easy to read and does not let big and small misses
+   cancel out. Yes/no models (default, early payoff) use accuracy and AUC
+   instead, because there is no "size" of a yes/no miss.
+
+Q: How accurate is it on your REAL data, not practice data?
+A: The "Model accuracy (MAE)" button on the page answers this live: it
+   compares what the system predicted at the time with what then happened,
+   last 12 closed months. Latest (all branches): collections off by about
+   5% a month, sales goal by about 2 units, borrower movement by about 3
+   borrowers.
+
+Q: How is next month's sales goal set?
+A: By the sales forecast (M8). We assume this month ends at 80% of its goal,
+   or at what is already sold if that is higher, forecast the next 2 months
+   from that, and next month's forecast becomes next month's goal. Beating
+   this month's goal therefore raises the next one.
+
+Q: Why aren't your accuracy scores 99%?
+A: People's finances are unpredictable. Near-perfect scores on credit data
+   usually mean the model accidentally saw the answer. Scores in the 80s-90s
+   on data the model never saw are realistic.
+
+
+================================================================================
+8. KNOWN LIMITS (say these before someone else does - NO SUGARCOATING)
+================================================================================
+  - The 80% goal assumption is a business setting, not learned:
+    The sales forecast assumes the current month closes at 80% of its goal
+    (TARGET_ATTAINMENT in dml/forecast_helpers.py). Management can change it.
+
+  - Sales forecast only wins near-term (Model 8):
+    It beats the old rule 1-2 months ahead, but 6-12 months ahead the simple
+    rule is slightly better on our real data. The page shows 2 months only;
+    the History tab's year-end line uses the longer horizons and is rougher.
+
+  - Dashed "expected" points hide a shortfall until month end:
+    During the live month the charts plot the expected month-end (what is
+    collected/sold so far, or the AI estimate if higher). A weak month only
+    shows as a drop when the month closes. Progress so far is in the
+    tooltips, the Collected This Month card and Share of Dues Paid.
+
+  - Portfolio Health forecast ignores loans that finish:
+    The 2-month on time / behind / default forecast adds new buyers but does
+    not remove borrowers who pay their loan off, so "on time" runs slightly
+    high.
+
+  - Old goals in the history:
+    Months recorded before the forecast-as-goal change still carry the old
+    formula goals until the history replay (run_walk_forward_pipeline.py) is
+    re-run. That replay overwrites every stored month: back up the
+    ai_* tables first.
+
+  - Early Settlement Precision vs Recall (Model 2):
+    While the model catches 100% of borrowers who settle early (Recall 100%, 
+    AUC 0.962), its precision is only 21.7% with an F1 score of 0.357. This 
+    means roughly 4 out of 5 borrowers flagged as "Early Payoff Candidates" 
+    will decline the offer because they prefer having liquidity in hand over 
+    paying off their motorcycle early. The tool is a screening filter, not a 
+    guarantee.
+
+  - Default False Alarm Tradeoff (Model 1):
+    To achieve a 91.25% recall and prevent unmonitored defaults, the model 
+    incurs 72 false positives (false alarms) out of 700 tested accounts. 
+    Borrowers with debt-to-income over 45% are frequently flagged even if they 
+    reliably receive informal remittances or cash gifts from relatives.
+
+  - Showroom Inventory Spike Blindness (Model 3):
+    The Poisson sales velocity model achieves 97.55% tolerance within ±1 unit, 
+    but it is inherently backward-looking. A sudden flash discount, festival 
+    promo, or local tricycle cooperative bulk purchase cannot be anticipated 
+    by trailing 3-month sales lags.
+
+  - Risk tiers differ between workflows:
+    "Run AI" (run_predictive_engine.py) uses 70/45/20%, while the history replay 
+    (run_walk_forward_pipeline.py) uses 70/40/15%. These should be normalized 
+    in future refactoring.
+
+  - Fixed reference points:
+    Loan lifecycle "risk driver" pills (e.g. "Partial payments 3.15x") are 
+    domain reference heuristics, not dynamically recomputed from live ledger 
+    correlations.
+
+  - Static GIS coordinates:
+    Branch expansion distances and nearest branch calculations come from a 
+    fixed municipal lookup table; opening a branch does not automatically 
+    recalculate road distances for neighboring barangays until the GIS list is 
+    updated.
+
+  - Cold-start branch lag:
+    A newly opened branch has zero historical ledger data. For the first 3 
+    months, sales velocity defaults to cautious company baselines and restock 
+    alerts will not trigger aggressively.
+
+================================================================================
+9. HOW THE CHARTS SHOW THE CURRENT MONTH AND THE 2-MONTH OUTLOOK
+================================================================================
+
+  Every trend chart shows the same window: 2 months back, this month, and
+  the next 2 months (History shows the whole year to December).
+
+  Line styles:
+    Solid line            = what really happened (closed months)
+    Dashed + hollow dots  = expected: this month's expected month-end, then
+                            the AI forecast
+    Dotted orange         = AI estimate / next goals, drawn so it shows
+                            between the dashes where the lines meet
+
+  This month is never plotted as its partial total (on the 1st that would
+  be a drop to zero). It shows the expected month-end instead:
+    Collections: received so far, or the AI estimate if higher
+    Sales:       sold so far, or 80% of the goal if higher
+    Per model:   sold so far, or the model's share of the expected sales
+  The real "so far" figure is in the tooltip. When the month closes, the
+  point becomes solid at the real total.
+
+  Charts and what feeds them:
+    Payments: Recent Months & Next 2 Months  -> M4 (+ M8 new-sales cash)
+    Amount Due vs Amount Received (History)  -> M4
+    Sales This Month                         -> M8 (forecast = next goals)
+    How Fast Each Model Sells (top 4 models) -> M3 split of M8
+    Portfolio Health                         -> M6 roll-forward
+
+================================================================================
+RECENT CHANGES & UPDATES (SEPT 26 - OCT 2, 2026)
+================================================================================
+
+✓ Oct 1-2, 2026 - forecasts, goals and accuracy
+  - M8 Monthly Sales Forecast is LIVE in both pipelines; its next-month
+    forecast becomes next month's goal (80% goal-attainment assumption)
+  - M8 headline test now scores only 1-2 months ahead (3,120 forecasts),
+    the horizons the page shows; all-horizon scores kept in the report
+  - Portfolio Health: line chart with a 2-month forecast (M6 roll-forward)
+  - How Fast Each Model Sells: top 4 models, 2-month forecast split from M8
+  - "Due this month" now = installment schedule in the live engine too
+    (was the sum of loan amortizations: P1,108,136 vs real P1,165,547)
+  - Charts continue dashed through the current month instead of dropping
+  - "Model accuracy (MAE)" popup: model type, test benchmark, live backtest
+    MAE, label, features and why each model was chosen
+  - M6 accuracy figures in Section 4 corrected to match benchmark_report.json
+  - M3 stock-level thresholds corrected to match the page (7 / 21 days)
+
+DOCUMENTATION UPDATED:
+---------------------------------------
+✓ ml_engine/ML_EXPLANATION_GUIDE.txt (Oct 2, 2026)
+  - Added M8 (Monthly Sales Forecast) model documentation
+  - Updated accuracy scorecard with M8 performance metrics
+  - (superseded) M8 was briefly listed as "not yet live"; it is live now
+  - Updated model retrain instructions to include train_sales_forecast_model.py
+
+FILES MODIFIED (Code & Configuration):
+---------------------------------------
+✓ pages/ai-sales-insights.php (Oct 1, 3:27 PM)
+  - Main dashboard UI updated with latest ML results rendering
+
+✓ pages/api_trigger_ai_insights.php (Sep 30, 12:27 PM)
+  - API endpoint for on-demand insight regeneration
+
+✓ config/ml_api_config.php (Sep 28, 7:28 AM)
+  - Updated ML engine API endpoints and configuration
+
+✓ ml_engine/app.py (Sep 30, 8:02 PM)
+  - Main ML pipeline orchestration
+
+✓ ml_engine/dml/markov_engine.py (Sep 30, 20:43)
+  - Enhanced Markov transition probability calculations
+
+✓ ml_engine/dml/action_recommender.py (Sep 30, 16:18)
+  - Refined tactical action dispatch logic
+
+✓ ml_engine/dml/velocity_engine.py (Sep 30, 15:51)
+  - Inventory velocity prediction updates
+
+✓ ml_engine/train_velocity_model.py (Sep 30, 15:48)
+  - Model retraining pipeline for inventory forecasting
+
+✓ ml_engine/train_branch_expansion.py (Sep 30, 18:04)
+  - Geospatial expansion model training
+
+TEST BATCH CREATED:
+✓ rawdata/test_uploads/07_batch_test_october_2026_new_applicants.csv (Oct 1)
+  - 3 test applicants (Oct 1-2, 2026)
+  - Account prefix: TEST-OCT-2026-XXXXX (easy removal)
+  - No payment history (fresh loan applications)
+
+================================================================================
+                                  END
+================================================================================
+

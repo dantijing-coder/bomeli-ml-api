@@ -1,5 +1,13 @@
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.log
+pipeline.log
 .env
 .venv/
+env/
 venv/
+scratch/
+.DS_Store
+Thumbs.db
+*.v1.*

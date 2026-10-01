@@ -8,7 +8,7 @@ FROM python:3.11-slim
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PORT=7860
+    PORT=10000
 
 # Install minimal OS utilities
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -29,8 +29,8 @@ COPY . /app
 # Ensure directories exist
 RUN mkdir -p /app/data /app/models /app/logs
 
-# Expose default port (7860 for Hugging Face, or Render dynamic $PORT)
-EXPOSE 7860
+# Expose default port (Render standard port 10000 or dynamic $PORT)
+EXPOSE 10000
 
 # Launch FastAPI web application
-CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-7860}"]
+CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-10000}"]

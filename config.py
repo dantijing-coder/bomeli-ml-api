@@ -22,12 +22,18 @@ os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(MODELS_DIR, exist_ok=True)
 
 # Database Configuration with Cloud / Environment Variable Overrides
+def _parse_port(val):
+    try:
+        return int(val) if val else 3306
+    except (ValueError, TypeError):
+        return 3306
+
 DB_CONFIG = {
     'host': os.getenv('DB_HOST', 'localhost'),
     'user': os.getenv('DB_USER', 'root'),
     'password': os.getenv('DB_PASSWORD', ''),
     'database': os.getenv('DB_NAME', 'bomeli_db1'),
-    'port': int(os.getenv('DB_PORT', 3306)),
+    'port': _parse_port(os.getenv('DB_PORT')),
     'charset': 'utf8mb4',
     'cursorclass': pymysql.cursors.DictCursor,
     'autocommit': True,
