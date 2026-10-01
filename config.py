@@ -37,7 +37,9 @@ DB_CONFIG = {
     'charset': 'utf8mb4',
     'cursorclass': pymysql.cursors.DictCursor,
     'autocommit': True,
-    'connect_timeout': 10
+    'connect_timeout': 15,
+    'read_timeout': 120,
+    'write_timeout': 120
 }
 
 # Optional API Security Key for Cloud Deployments

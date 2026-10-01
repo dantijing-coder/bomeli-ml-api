@@ -36,12 +36,29 @@ from dml.forecast_helpers import (
 )
 
 
+def ensure_connection(conn):
+    """Ensures MySQL connection is alive, pinging and reconnecting if timed out or dropped."""
+    if conn is None:
+        return get_db_connection()
+    try:
+        conn.ping(reconnect=True)
+        return conn
+    except Exception as e:
+        print(f"[pipeline] Notice: Reconnecting dropped database connection ({e})")
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return get_db_connection()
+
+
 def load_ledger_context(conn, forecast_month):
     """
     Loads the raw payment / installment ledger once so that:
       - Markov roll-rates use real transitions (status at start of month -> status today)
       - the forward forecast uses the booked installment schedule + expected new sales
     """
+    conn = ensure_connection(conn)
     with conn.cursor() as cur:
         cur.execute("""
             SELECT s.sale_id, u.branch_id, s.account_no, s.monthly_amortization, s.created_at
@@ -297,6 +314,7 @@ def sync_live_historical_snapshots(conn):
     Computes true scheduled dues, actual collections, efficiency, active accounts,
     and delinquency/default counts for every historical month per branch and global network.
     """
+    conn = ensure_connection(conn)
     with conn.cursor() as cur:
         # Find all distinct payment months in the database
         cur.execute("""
@@ -311,10 +329,19 @@ def sync_live_historical_snapshots(conn):
         if not months:
             return
 
+        cur.execute("SELECT DISTINCT snapshot_month FROM ai_portfolio_monthly_snapshots")
+        existing_months = set(r['snapshot_month'] for r in cur.fetchall())
+
         cur.execute("SELECT branch_id, name FROM branches ORDER BY branch_id ASC")
         branches = cur.fetchall()
 
-        for m in months:
+        # Always re-sync the last 3 months (in case of recent adjustments), plus any historical months not yet snapshot
+        current_m = datetime.now().strftime('%Y-%m')
+        recent_window = set(months[-3:]) if len(months) >= 3 else set(months)
+        recent_window.add(current_m)
+        months_to_sync = [m for m in months if m in recent_window or m not in existing_months]
+
+        for m in months_to_sync:
             cur.execute("SELECT LAST_DAY(%s) AS ld", (m + '-01',))
             ld_res = cur.fetchone()
             ld = ld_res['ld'] if ld_res else (m + '-28')
@@ -465,10 +492,12 @@ def sync_live_historical_snapshots(conn):
                      collection_efficiency_pct, active_accounts_count, delinquent_count, defaulted_count)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """, (m, bid, b_sch, b_col, b_eff, b_act, b_delinq, b_default))
+            conn.commit()
 
 
 def fetch_live_data(conn):
     """Fetches active loans, inventory, vehicle models, and branches from MySQL."""
+    conn = ensure_connection(conn)
     with conn.cursor() as cur:
         cur.execute("SELECT branch_id, name FROM branches ORDER BY branch_id ASC")
         branches = cur.fetchall()
@@ -1253,6 +1282,7 @@ def run_predictive_pipeline(target_month: str = None):
     for b in branches:
         scopes.append({'branch_id': b['branch_id'], 'name': b['name'], 'scope_type': 'branch'})
 
+    conn = ensure_connection(conn)
     with conn.cursor() as cur:
         # Ensure ai_account_risk_scores table exists
         cur.execute("""
@@ -1291,22 +1321,27 @@ def run_predictive_pipeline(target_month: str = None):
         # Clean prior predictions for the current month
         cur.execute("DELETE FROM ai_account_risk_scores WHERE forecast_month = %s", (current_month_str,))
 
-        # Ingest account risk scores
-        for acc in scored_accounts:
-            cur.execute("""
+        # Ingest account risk scores in high-speed bulk
+        if scored_accounts:
+            risk_records = [
+                (
+                    current_month_str, acc['sale_id'], acc['customer_id'], acc['branch_id'],
+                    acc['account_no'], acc['customer_name'], acc['current_status'],
+                    acc['overdue_count'], acc['default_probability'], acc['early_settlement_probability'],
+                    acc['hazard_tier'], acc['recommended_action'],
+                    acc.get('macro_type', 'ROUTINE_SERVICING'),
+                    acc.get('macro_label', 'No Action')
+                )
+                for acc in scored_accounts
+            ]
+            cur.executemany("""
                 INSERT INTO ai_account_risk_scores
                 (forecast_month, sale_id, customer_id, branch_id, account_no, customer_name,
                  current_status, overdue_count, default_probability, early_settlement_probability,
                  hazard_tier, recommended_action, macro_type, macro_label)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (
-                current_month_str, acc['sale_id'], acc['customer_id'], acc['branch_id'],
-                acc['account_no'], acc['customer_name'], acc['current_status'],
-                acc['overdue_count'], acc['default_probability'], acc['early_settlement_probability'],
-                acc['hazard_tier'], acc['recommended_action'],
-                acc.get('macro_type', 'ROUTINE_SERVICING'),
-                acc.get('macro_label', 'No Action')
-            ))
+            """, risk_records)
+        conn.commit()
 
         # Process each scope
         for scope in scopes:
@@ -1513,6 +1548,11 @@ def run_predictive_pipeline(target_month: str = None):
                 pending_collections, scope_inv, markov_result, rate_pkg, is_global, scope_sales
             )
 
+            try:
+                conn.ping(reconnect=True)
+            except Exception:
+                pass
+
             # Clean and insert
             if is_global:
                 cur.execute("DELETE FROM ai_predictive_insights WHERE forecast_month = %s AND branch_id IS NULL", (current_month_str,))
@@ -1554,6 +1594,8 @@ def run_predictive_pipeline(target_month: str = None):
                     sum(1 for a in scope_accounts if a['current_status'] == 'defaulted')
                 ))
 
+            conn.commit()
+
             print(
                 f"[{scope_type}] {scope['name']}: "
                 f"PHP{expected_sum:,.2f}/{scheduled_sum:,.2f} — "
@@ -1562,8 +1604,10 @@ def run_predictive_pipeline(target_month: str = None):
                 f"({markov_result.get('data_quality', 'blended')})"
             )
 
-    conn.commit()
-    conn.close()
+    try:
+        conn.close()
+    except Exception:
+        pass
 
     print(f"\n=== PIPELINE COMPLETED SUCCESSFULLY FOR {current_month_str} ===")
     print(f"Upserted: Global Consolidated Network + {len(branches)} Branches.")
